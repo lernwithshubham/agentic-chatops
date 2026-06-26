@@ -269,10 +269,3 @@ Notes:
 
 ---
 
-## Contributing
-
-Contributions are welcome. Please open issues or PRs for bugs, feature requests, or improvements to runbook content.
-
-## License
-
-MIT
