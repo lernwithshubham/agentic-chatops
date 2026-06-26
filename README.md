@@ -1,6 +1,6 @@
 # Autonomous SRE Agent: Human-in-the-Loop ChatOps
 
-This repository contains the architecture and application code to deploy an Autonomous Site Reliability Engineering (SRE) Agent. The agent investigates production alerts, cross-references internal Standard Operating Procedures (SOPs), and requests human approval via Slack before executing remediation commands on the server.
+This repository contains the architecture and application code to deploy an Autonomous Site Reliability Engineering (SRE) Agent. The agent investigates production alerts, cross-references internal runbooks, and — with human approval — executes safe remediation steps to resolve incidents.
 
 ## 🏗️ Architecture Flow
 
@@ -33,7 +33,7 @@ sequenceDiagram
 - A Google Gemini API Key.
 - A Slack Workspace with permissions to create a new App.
 - An Ngrok Auth Token (for tunneling webhooks).
-- A LangSmith API Key (optional, for tracing).
+- A LangSmith API Key (optional, for tracing & observability).
 
 ## 🚀 Phase 1: Infrastructure & The "Trap"
 
@@ -112,7 +112,13 @@ SLACK_CHANNEL_ID="C01234567"
 EC2_HOST="127.0.0.1"
 EC2_USER="root"
 EC2_KEY_PATH="/root/.ssh/id_ed25519"
+
+# LangSmith (Observability)
+LANGSMITH_API_KEY="your_langsmith_api_key"
+LANGSMITH_PROJECT="Autonomous_SRE_Demo"
 ```
+
+> Note: LangSmith tracing is optional but highly recommended in production-like testing to inspect the agent's reasoning, tool usage, and costs.
 
 ## 🌐 Phase 4: Webhooks & Slack Setup
 
@@ -169,3 +175,104 @@ Click the **Approve Restart** button.
 ### Verify the Fix:
 
 Return to your EC2 terminal and run `docker ps` to verify the Nginx container's uptime has been successfully reset.
+
+## 🔎 Phase 6: Observability & Tracing (LangSmith)
+
+Agentic AI operates as a "black box" by default. To make this enterprise-ready, we integrate LangSmith to trace the AI's thought process, tool execution, and token usage. The tracing layer is intentionally lightweight in the demo but can be extended for production.
+
+### Quick enable
+
+1. Add `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` to your `.env` (see above).
+2. Restart the backend so the tracer picks up the environment variables.
+
+### What you will find in a LangSmith trace (detailed)
+
+- Execution DAG (waterfall):
+  - Full visual DAG showing nodes (LLM calls, tool calls, function steps) and their ordering (START -> diagnostics_agent -> human_in_the_loop -> remediation).
+  - Each node is clickable to inspect details.
+
+- LLM node details:
+  - Raw prompt / system + user messages (what the model actually saw).
+  - Model name, parameters (temperature, max_tokens), and model response text.
+  - Token usage: prompt tokens, completion tokens, total tokens — useful to estimate cost per incident.
+  - Latency for the LLM generation (wall-clock time).
+
+- Tool / external call tracing:
+  - Exact tool invocation (e.g., SSH command executed via Paramiko), arguments, working directory, and any structured inputs.
+  - Captured stdout/stderr from the remote command (if configured to capture); in this project we surface docker logs and command output in the trace.
+  - Duration and success/failure status of each tool call.
+
+- Attachments and context snapshots:
+  - Snapshots of files or artifacts included in the context (runbook.md content, selected docker logs) attached to the run for later inspection.
+  - You can click attachments to expand and read the exact content that was given to the model.
+
+- Human-in-the-loop events:
+  - Timestamped actions for approvals/denials from Slack with the user identity (or anonymized ID depending on configuration).
+  - The exact decision boundary where the agent paused and what it was waiting for.
+
+- Error events & retries:
+  - Stack traces or structured error messages captured during execution.
+  - Automatic or manual retry attempts with inputs that changed between attempts.
+
+- Metadata & tags:
+  - Run-level metadata: project, environment, incident_id/tag, commit SHA, host name.
+  - Custom tags you add (for example, severity=high, team=platform). These make searching and grouping runs easier.
+
+- Searchable timeline and filters:
+  - Filter traces by model name, user, tag, time range, or specific tool names (e.g., Paramiko/SSH).
+  - Full-text search of prompts and tool outputs (useful when auditing repeated failures).
+
+- Cost & performance dashboards:
+  - Aggregate token consumption across runs, average latency per LLM call, and per-tool time breakdown.
+  - Identify expensive runs and optimize prompts or reduce unnecessary context.
+
+- Privacy & Redaction hints (important):
+  - Traces can contain sensitive information (keys, IPs, secrets) if you log raw prompts and tool outputs. Configure redaction rules or sanitize inputs before sending them to LangSmith.
+  - Prefer attaching sanitized artifacts when possible and limit raw prompt logging in production.
+
+### Example trace use-cases
+
+- Forensics: After a bad remediation, open the trace to see the exact prompt, the logs fed to the model, the model's proposed command, and the human approval step.
+- Cost analysis: Find runs with high token usage and inspect the prompt sizes to trim unnecessary context (large logs embedded inline are often the culprit).
+- Latency investigation: Determine whether the pipeline is waiting on SSH/tool execution or on LLM generation.
+- Audit & Compliance: Export trace artifacts showing what decisions the agent made and why, useful for post-incident review.
+
+### Minimal instrumentation example (conceptual)
+
+Add a tracer into your runtime so LangSmith receives traces. The exact code depends on your LangChain / LangSmith SDK version; below is a conceptual example — consult LangSmith docs for exact APIs:
+
+```python name=examples/langsmith_instrumentation.py
+import os
+from langchain.callbacks import LangSmithTracer  # conceptual import
+
+os.environ.setdefault("LANGSMITH_API_KEY", "YOUR_KEY")
+tracer = LangSmithTracer(project_name=os.environ.get("LANGSMITH_PROJECT", "Autonomous_SRE_Demo"))
+
+# Register tracer with your LLM/callback manager so each chain/LLM call is traced.
+# Example (conceptual):
+# llm = OpenAI(temperature=0, callbacks=[tracer])
+# chain = LLMChain(llm=llm, ...)
+# chain.run("analyze the logs")
+```
+
+Notes:
+- The repository's demo keeps a minimal, non-invasive tracing footprint. In production, prefer attaching structured logs rather than embedding huge raw files in prompts.
+- Confirm the LangSmith SDK/version you use and follow their official quickstart to wire callbacks correctly.
+
+### Best practices for using LangSmith with this project
+
+- Tag every run with an incident_id and host so you can correlate traces with monitoring/alerting systems.
+- Sanitize and redact secrets from captured outputs before sending them to the trace store.
+- Attach only the relevant slice of logs (time-bounded) rather than entire log files to reduce token costs and noise.
+- Add custom metadata (e.g., deployment version, runbook version) so run comparisons are meaningful.
+- Set retention and access controls to satisfy your organization's compliance requirements.
+
+---
+
+## Contributing
+
+Contributions are welcome. Please open issues or PRs for bugs, feature requests, or improvements to runbook content.
+
+## License
+
+MIT
